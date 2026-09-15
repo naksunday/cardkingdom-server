@@ -216,6 +216,28 @@ function handleMessage(ws, msg) {
     return;
   }
 
+  if (type === 'add_bot') {
+    const room = roomManager.getRoomByPlayer(playerId);
+    if (!room) return send(ws, { type: 'error', reason: 'Not in a room' });
+    if (room.hostId !== playerId) return send(ws, { type: 'error', reason: 'Only the host can add bots' });
+    const result = roomManager.addBot(room.code);
+    if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
+    room.broadcastAll({ type: 'room_updated', room: room.publicInfo() });
+    broadcastRoomList();
+    return;
+  }
+
+  if (type === 'remove_bot') {
+    const room = roomManager.getRoomByPlayer(playerId);
+    if (!room) return send(ws, { type: 'error', reason: 'Not in a room' });
+    if (room.hostId !== playerId) return send(ws, { type: 'error', reason: 'Only the host can remove bots' });
+    const result = roomManager.removeBot(room.code);
+    if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
+    room.broadcastAll({ type: 'room_updated', room: room.publicInfo() });
+    broadcastRoomList();
+    return;
+  }
+
   // ── Gameplay ─────────────────────────────────────────────────────────────────
   if (type === 'play_cards' || type === 'pass_turn' || type === 'play_card') {
     const room = roomManager.getRoomByPlayer(playerId);

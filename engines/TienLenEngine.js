@@ -111,17 +111,26 @@ class TienLenEngine {
   /** Deal cards. Returns { [playerId]: [cards] } for the server to send privately. */
   deal() {
     const deck = shuffle(buildDeck());
-    const n = this.playerIds.length; // 2, 3, or 4
-    const cardsPerPlayer = Math.floor(52 / n);
+    const cardsPerPlayer = 13;
     this.hands = {};
     this.playerIds.forEach((id, i) => {
       this.hands[id] = deck.slice(i * cardsPerPlayer, (i + 1) * cardsPerPlayer);
     });
 
-    // Determine who has 3♠ → that player goes first
-    const has3Spades = (pid) => this.hands[pid].some(c => c.rank === 0 && c.suit === 0);
-    const starterIdx = this.playerIds.findIndex(has3Spades);
-    this.currentTurnIdx = starterIdx >= 0 ? starterIdx : 0;
+    // Determine starter: player with lowest card (3♠ = rank 0, suit 0 is lowest)
+    let lowestPlayer = 0;
+    let lowestCard = { rank: 99, suit: 99 };
+    this.playerIds.forEach((pid, idx) => {
+      for (const c of this.hands[pid]) {
+        if (c.rank < lowestCard.rank || (c.rank === lowestCard.rank && c.suit < lowestCard.suit)) {
+          lowestCard = c;
+          lowestPlayer = idx;
+        }
+      }
+    });
+
+    this.lowestCard = lowestCard;
+    this.currentTurnIdx = lowestPlayer;
     this.tableLeadIdx = this.currentTurnIdx;
     this.started = true;
     this.firstTurn = true;
@@ -146,10 +155,10 @@ class TienLenEngine {
     const classified = classifyHand(cardObjects);
     if (classified.type === HandType.INVALID) return { ok: false, reason: 'Invalid hand type' };
 
-    // First turn of the entire game must include 3♠
-    if (this.firstTurn) {
-      const has3S = cardObjects.some(c => c.rank === 0 && c.suit === 0);
-      if (!has3S) return { ok: false, reason: 'First play must include 3♠' };
+    // First turn of the entire game must include the lowest card held in the game
+    if (this.firstTurn && this.lowestCard) {
+      const hasLowest = cardObjects.some(c => c.rank === this.lowestCard.rank && c.suit === this.lowestCard.suit);
+      if (!hasLowest) return { ok: false, reason: 'First play must include your lowest card' };
     }
 
     // Must beat the table

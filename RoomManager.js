@@ -81,7 +81,12 @@ class Room {
       maxPlayers: this.maxPlayers,
       hasPin: !!this.pin,
       betAmount: this.betAmount || 0,
-      players: this.players.map(p => ({ id: p.id, name: p.name, ready: p.ready })),
+      players: this.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        ready: p.ready,
+        isBot: !!p.isBot || (p.id && p.id.startsWith('bot_'))
+      })),
     };
   }
 }
@@ -150,6 +155,38 @@ class RoomManager {
     }
   }
 
+  addBot(code) {
+    const room = this.rooms.get(code);
+    if (!room) return { ok: false, reason: 'Room not found' };
+    if (room.state !== 'waiting') return { ok: false, reason: 'Game already started' };
+    if (room.isFull()) return { ok: false, reason: 'Room is full' };
+
+    const botNames = ['Bot Dara 🤖', 'Bot Sokha 🤖', 'Bot Chanthy 🤖', 'Bot Visal 🤖', 'Bot Samnang 🤖'];
+    let chosenName = 'Bot Player 🤖';
+    for (const name of botNames) {
+      if (!room.players.some(p => p.name === name)) {
+        chosenName = name;
+        break;
+      }
+    }
+
+    const botId = 'bot_' + Math.floor(1000 + Math.random() * 9000);
+    room.players.push({ id: botId, name: chosenName, ws: null, ready: true, isBot: true });
+    return { ok: true, room };
+  }
+
+  removeBot(code) {
+    const room = this.rooms.get(code);
+    if (!room) return { ok: false, reason: 'Room not found' };
+    if (room.state !== 'waiting') return { ok: false, reason: 'Game already started' };
+
+    const idx = room.players.map(p => p.isBot || (p.id && p.id.startsWith('bot_'))).lastIndexOf(true);
+    if (idx < 0) return { ok: false, reason: 'No bots in room' };
+
+    room.players.splice(idx, 1);
+    return { ok: true, room };
+  }
+
   /** Start game — deal cards and send private hands. Returns events to broadcast. */
   startGame(code) {
     const room = this.rooms.get(code);
@@ -169,13 +206,21 @@ class RoomManager {
     const hands = room.engine.deal();
     room.state = 'playing';
 
-    // Send each player their private hand
-    for (const pid of room.playerIds) {
-      room.send(pid, { type: 'game_started', yourHand: hands[pid], gameState: room.engine.getPublicState() });
+    // Send each player their private hand and game_started message
+    for (const p of room.players) {
+      if (p.ws && p.ws.readyState === 1) {
+        p.ws.send(JSON.stringify({
+          type: 'game_started',
+          yourHand: hands[p.id] || [],
+          gameState: room.engine.getPublicState(),
+          room: room.publicInfo()
+        }));
+      }
     }
 
+    room.broadcastAll({ type: 'room_updated', room: room.publicInfo() });
     room.broadcastAll({ type: 'game_state', gameState: room.engine.getPublicState() });
-    return { ok: true };
+    return { ok: true, room };
   }
 
   listPublicRooms() {
