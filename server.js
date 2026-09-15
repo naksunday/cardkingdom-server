@@ -78,6 +78,7 @@ wss.on('connection', (ws) => {
     if (room) {
       room.broadcast({ type: 'player_left', playerId: client.playerId, playerName: client.playerName }, client.playerId);
       roomManager.leaveRoom(client.playerId);
+      broadcastRoomList();
     }
     clients.delete(ws);
     console.log(`[WS] ${client.playerName} disconnected`);
@@ -88,6 +89,15 @@ wss.on('connection', (ws) => {
 
 function send(ws, msg) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function broadcastRoomList() {
+  const payload = JSON.stringify({ type: 'room_list', rooms: roomManager.listPublicRooms() });
+  for (const clientWs of clients.keys()) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(payload);
+    }
+  }
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
@@ -160,7 +170,9 @@ function handleMessage(ws, msg) {
       });
       room.getPlayer(playerId).ws = ws;
       console.log(`[Room] ${playerName} created ${room.code} (${room.gameType}) bet:${room.betAmount || 0}`);
-      return send(ws, { type: 'room_created', room: room.publicInfo() });
+      send(ws, { type: 'room_created', room: room.publicInfo() });
+      broadcastRoomList();
+      return;
     } catch (err) { return send(ws, { type: 'error', reason: err.message }); }
   }
 
@@ -169,6 +181,7 @@ function handleMessage(ws, msg) {
     if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
     send(ws, { type: 'room_joined', room: result.room.publicInfo(), reconnected: result.reconnected });
     result.room.broadcast({ type: 'room_updated', room: result.room.publicInfo() }, playerId);
+    broadcastRoomList();
     return;
   }
 
@@ -177,6 +190,7 @@ function handleMessage(ws, msg) {
     if (room) {
       room.broadcast({ type: 'player_left', playerId, playerName }, playerId);
       roomManager.leaveRoom(playerId);
+      broadcastRoomList();
     }
     return send(ws, { type: 'room_left' });
   }
@@ -198,6 +212,7 @@ function handleMessage(ws, msg) {
     if (room.hostId !== playerId) return send(ws, { type: 'error', reason: 'Only the host can start' });
     const result = roomManager.startGame(room.code);
     if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
+    broadcastRoomList();
     return;
   }
 
