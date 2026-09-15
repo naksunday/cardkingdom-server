@@ -22,7 +22,7 @@ function generateCode(gameType) {
 }
 
 class Room {
-  constructor({ gameType, hostId, hostName, pin, maxPlayers }) {
+  constructor({ gameType, hostId, hostName, pin, maxPlayers, betAmount }) {
     this.id = uuidv4();
     this.code = generateCode(gameType);
     this.gameType = gameType;
@@ -80,6 +80,7 @@ class Room {
       playerCount: this.players.length,
       maxPlayers: this.maxPlayers,
       hasPin: !!this.pin,
+      betAmount: this.betAmount || 0,
       players: this.players.map(p => ({ id: p.id, name: p.name, ready: p.ready })),
     };
   }
