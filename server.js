@@ -130,10 +130,11 @@ function handleMessage(ws, msg) {
 
   // Legacy guest connect (no account)
   if (type === 'connect_player') {
-    const { playerId, playerName } = msg;
+    const { playerId, playerName, avatarIndex } = msg;
     if (!playerId || !playerName) return send(ws, { type: 'error', reason: 'connect_player requires playerId and playerName' });
-    clients.set(ws, { playerId, playerName, elo: 1200, token: null });
-    console.log(`[WS] ${playerName} (guest) connected`);
+    const av = typeof avatarIndex === 'number' ? avatarIndex : 0;
+    clients.set(ws, { playerId, playerName, avatarIndex: av, elo: 1200, token: null });
+    console.log(`[WS] ${playerName} (avatar:${av}) connected`);
     return send(ws, { type: 'connected', playerId, serverVersion: '2.0.0' });
   }
 
@@ -141,6 +142,7 @@ function handleMessage(ws, msg) {
   const client = clients.get(ws);
   if (!client) return send(ws, { type: 'error', reason: 'Send connect_player or login first' });
   const { playerId, playerName } = client;
+  const avatarIndex = typeof msg.avatarIndex === 'number' ? msg.avatarIndex : (client.avatarIndex || 0);
 
   if (type === 'ping') return send(ws, { type: 'pong', timestamp: Date.now() });
 
@@ -148,6 +150,7 @@ function handleMessage(ws, msg) {
   if (type === 'quick_match') {
     const result = matchmakingQueue.enqueue({
       playerId, playerName,
+      avatarIndex,
       elo: client.elo || 1200,
       gameType: msg.gameType,
       ws,
@@ -165,11 +168,12 @@ function handleMessage(ws, msg) {
     try {
       const room = roomManager.createRoom({
         gameType: msg.gameType, hostId: playerId, hostName: playerName,
+        hostAvatarIndex: avatarIndex,
         pin: msg.pin || null, maxPlayers: msg.maxPlayers || 4,
         betAmount: msg.betAmount || 0,
       });
       room.getPlayer(playerId).ws = ws;
-      console.log(`[Room] ${playerName} created ${room.code} (${room.gameType}) bet:${room.betAmount || 0}`);
+      console.log(`[Room] ${playerName} created ${room.code} (${room.gameType}) bet:${room.betAmount || 0} avatar:${avatarIndex}`);
       send(ws, { type: 'room_created', room: room.publicInfo() });
       broadcastRoomList();
       return;
@@ -177,7 +181,7 @@ function handleMessage(ws, msg) {
   }
 
   if (type === 'join_room') {
-    const result = roomManager.joinRoom({ code: msg.code, playerId, playerName, pin: msg.pin || null, ws });
+    const result = roomManager.joinRoom({ code: msg.code, playerId, playerName, pin: msg.pin || null, ws, avatarIndex });
     if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
     send(ws, { type: 'room_joined', room: result.room.publicInfo(), reconnected: result.reconnected });
     result.room.broadcast({ type: 'room_updated', room: result.room.publicInfo() }, playerId);
@@ -213,6 +217,7 @@ function handleMessage(ws, msg) {
     const result = roomManager.startGame(room.code);
     if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
     broadcastRoomList();
+    scheduleBotTurn(room);
     return;
   }
 
@@ -267,6 +272,8 @@ function handleMessage(ws, msg) {
           if (p.id !== rankings[0]) AuthService.addCoins(p.id, -room.betAmount);
         });
       }
+    } else {
+      scheduleBotTurn(room);
     }
     return;
   }
@@ -315,4 +322,112 @@ function handleMessage(ws, msg) {
   }
 
   send(ws, { type: 'error', reason: `Unknown message type: ${type}` });
+}
+
+// ── Bot AI Automation ─────────────────────────────────────────────────────────
+function scheduleBotTurn(room) {
+  if (!room || !room.engine || room.state !== 'playing' || room.engine.finished) return;
+  const currentPid = room.engine.currentPlayer;
+  if (!currentPid || !currentPid.startsWith('bot_')) return;
+
+  setTimeout(() => {
+    if (!room || !room.engine || room.state !== 'playing' || room.engine.finished) return;
+    if (room.engine.currentPlayer !== currentPid) return;
+
+    const move = findBotMove(room.engine, currentPid);
+    let result;
+    if (move && move.length > 0) {
+      result = room.engine.playCards(currentPid, move);
+    } else {
+      result = room.engine.pass(currentPid);
+    }
+
+    if (result && result.ok) {
+      const state = room.engine.getPublicState();
+      room.broadcastAll({ type: 'play_result', ok: true, events: result.events, gameState: state });
+
+      if (state.finished) {
+        room.state = 'finished';
+        const rankings = state.rankings;
+        AuthService.recordMatchResult(rankings, rankings);
+        if (room.betAmount > 0) {
+          const pot = room.betAmount * room.players.length;
+          AuthService.addCoins(rankings[0], pot);
+          room.players.forEach(p => {
+            if (p.id !== rankings[0]) AuthService.addCoins(p.id, -room.betAmount);
+          });
+        }
+      } else {
+        scheduleBotTurn(room);
+      }
+    }
+  }, 1000);
+}
+
+function findBotMove(engine, botId) {
+  const hand = engine.hands ? engine.hands[botId] : null;
+  if (!hand || hand.length === 0) return null;
+
+  const sortedHand = [...hand].sort((a, b) => {
+    const pA = (a.rank === 12 ? 100 : a.rank) * 4 + a.suit;
+    const pB = (b.rank === 12 ? 100 : b.rank) * 4 + b.suit;
+    return pA - pB;
+  });
+
+  const tablePlay = engine.tablePlay;
+
+  // Free lead
+  if (!tablePlay) {
+    if (engine.firstTurn && engine.lowestCard) {
+      return [engine.lowestCard];
+    }
+    return [sortedHand[0]];
+  }
+
+  // Beat Single
+  if (tablePlay.type === 'single') {
+    const target = tablePlay.cards[0];
+    const targetPower = (target.rank === 12 ? 100 : target.rank) * 4 + target.suit;
+    for (const card of sortedHand) {
+      const p = (card.rank === 12 ? 100 : card.rank) * 4 + card.suit;
+      if (p > targetPower) {
+        return [card];
+      }
+    }
+    return null;
+  }
+
+  // Beat Pair
+  if (tablePlay.type === 'pair') {
+    const targetMax = tablePlay.cards[1] || tablePlay.cards[0];
+    const targetPower = (targetMax.rank === 12 ? 100 : targetMax.rank) * 4 + targetMax.suit;
+    for (let i = 0; i < sortedHand.length - 1; i++) {
+      if (sortedHand[i].rank === sortedHand[i + 1].rank) {
+        const pair = [sortedHand[i], sortedHand[i + 1]];
+        const p = (pair[1].rank === 12 ? 100 : pair[1].rank) * 4 + pair[1].suit;
+        if (p > targetPower) {
+          return pair;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Beat Triple
+  if (tablePlay.type === 'triple') {
+    const targetMax = tablePlay.cards[2] || tablePlay.cards[0];
+    const targetPower = (targetMax.rank === 12 ? 100 : targetMax.rank) * 4 + targetMax.suit;
+    for (let i = 0; i < sortedHand.length - 2; i++) {
+      if (sortedHand[i].rank === sortedHand[i + 1].rank && sortedHand[i].rank === sortedHand[i + 2].rank) {
+        const triple = [sortedHand[i], sortedHand[i + 1], sortedHand[i + 2]];
+        const p = (triple[2].rank === 12 ? 100 : triple[2].rank) * 4 + triple[2].suit;
+        if (p > targetPower) {
+          return triple;
+        }
+      }
+    }
+    return null;
+  }
+
+  return null; // Pass
 }

@@ -22,7 +22,7 @@ function generateCode(gameType) {
 }
 
 class Room {
-  constructor({ gameType, hostId, hostName, pin, maxPlayers, betAmount }) {
+  constructor({ gameType, hostId, hostName, pin, maxPlayers, betAmount, hostAvatarIndex }) {
     this.id = uuidv4();
     this.code = generateCode(gameType);
     this.gameType = gameType;
@@ -30,17 +30,23 @@ class Room {
     this.pin = pin || null;         // optional PIN (4 digits)
     this.maxPlayers = Math.min(maxPlayers || MAX_PLAYERS[gameType], MAX_PLAYERS[gameType]);
     this.state = 'waiting';         // waiting | playing | finished
-    this.players = [];              // [{ id, name, ws, ready }]
+    this.players = [];              // [{ id, name, ws, ready, avatarIndex }]
     this.engine = null;
     this.betAmount = betAmount || 0;   // coins each player bets; winner takes all
     this.createdAt = Date.now();
 
     // Add host immediately
-    this.addPlayer(hostId, hostName, null);
+    this.addPlayer(hostId, hostName, null, typeof hostAvatarIndex === 'number' ? hostAvatarIndex : 0);
   }
 
-  addPlayer(id, name, ws) {
-    this.players.push({ id, name, ws, ready: false });
+  addPlayer(id, name, ws, avatarIndex = 0) {
+    this.players.push({
+      id,
+      name,
+      ws,
+      ready: false,
+      avatarIndex: typeof avatarIndex === 'number' ? avatarIndex : 0
+    });
   }
 
   removePlayer(id) {
@@ -85,7 +91,8 @@ class Room {
         id: p.id,
         name: p.name,
         ready: p.ready,
-        isBot: !!p.isBot || (p.id && p.id.startsWith('bot_'))
+        isBot: !!p.isBot || (p.id && p.id.startsWith('bot_')),
+        avatarIndex: typeof p.avatarIndex === 'number' ? p.avatarIndex : 0
       })),
     };
   }
@@ -120,7 +127,7 @@ class RoomManager {
     return code ? this.rooms.get(code) : null;
   }
 
-  joinRoom({ code, playerId, playerName, pin, ws }) {
+  joinRoom({ code, playerId, playerName, pin, ws, avatarIndex }) {
     const room = this.rooms.get(code);
     if (!room) return { ok: false, reason: 'Room not found' };
     if (room.state !== 'waiting') return { ok: false, reason: 'Game already started' };
@@ -131,11 +138,13 @@ class RoomManager {
     const existing = room.getPlayer(playerId);
     if (existing) {
       existing.ws = ws;
+      if (typeof avatarIndex === 'number') existing.avatarIndex = avatarIndex;
+      if (playerName) existing.name = playerName;
       this.playerRoom.set(playerId, code);
       return { ok: true, room, reconnected: true };
     }
 
-    room.addPlayer(playerId, playerName, ws);
+    room.addPlayer(playerId, playerName, ws, typeof avatarIndex === 'number' ? avatarIndex : 0);
     this.playerRoom.set(playerId, code);
     return { ok: true, room, reconnected: false };
   }
@@ -171,7 +180,8 @@ class RoomManager {
     }
 
     const botId = 'bot_' + Math.floor(1000 + Math.random() * 9000);
-    room.players.push({ id: botId, name: chosenName, ws: null, ready: true, isBot: true });
+    const botAvatar = ((room.players.length) % 4) + 1; // 1, 2, 3, 4
+    room.players.push({ id: botId, name: chosenName, ws: null, ready: true, isBot: true, avatarIndex: botAvatar });
     return { ok: true, room };
   }
 

@@ -237,6 +237,8 @@ class TienLenEngine {
       handCounts,
       rankings: this.rankings,
       finished: this.finished,
+      firstTurn: this.firstTurn,
+      lowestCard: this.lowestCard,
     };
   }
 }
