@@ -321,22 +321,96 @@ function handleMessage(ws, msg) {
     return send(ws, { type: 'friends_list', friends: enriched });
   }
 
-  if (type === 'add_friend') {
+  // ── Friends API (Real-Time Requests & Confirmation) ─────────────────────────
+
+  if (type === 'add_friend' || type === 'send_friend_request') {
     const targetId = msg.targetId || msg.friendId;
-    const result = AuthService.addFriend(playerId, targetId);
+    const result = AuthService.sendFriendRequest(playerId, targetId);
     if (!result.ok) {
-      return send(ws, { type: 'add_friend_result', ok: false, reason: result.reason });
+      return send(ws, { type: 'send_friend_request_result', ok: false, reason: result.reason });
+    }
+
+    // Direct friendship occurred (both requested each other)
+    if (result.friend) {
+      const frClient = getClientByPlayerId(result.friend.id);
+      let frStatus = frClient ? (frClient.client.status || 'online_lobby') : 'offline';
+      let rCode = frClient ? frClient.client.currentRoomCode : null;
+      let gType = frClient ? frClient.client.gameType : null;
+
+      const friendPayload = {
+        id: result.friend.id,
+        name: result.friend.username,
+        vipLevel: Math.min(10, Math.max(1, Math.floor((result.friend.level || 1) / 5) + 1)),
+        coins: result.friend.coins || 0,
+        level: result.friend.level || 1,
+        avatarIndex: result.friend.avatarIndex || 0,
+        customAvatar: result.friend.customAvatar || null,
+        status: frStatus,
+        currentRoomCode: rCode,
+        gameType: gType,
+      };
+
+      if (frClient) {
+        send(frClient.ws, {
+          type: 'friend_request_accepted',
+          friend: {
+            id: playerId,
+            name: client.playerName,
+            vipLevel: Math.min(10, Math.max(1, Math.floor((client.level || 1) / 5) + 1)),
+            coins: client.coins || 0,
+            level: client.level || 1,
+            avatarIndex: client.avatarIndex || 0,
+            customAvatar: client.customAvatar || null,
+            status: client.status || 'online_lobby',
+            currentRoomCode: client.currentRoomCode || null,
+            gameType: client.gameType || null,
+          }
+        });
+      }
+
+      return send(ws, {
+        type: 'friend_request_accepted',
+        friend: friendPayload,
+        message: `You and ${result.friend.username} are now friends!`
+      });
+    }
+
+    // Pending friend request
+    const targetOnline = getClientByPlayerId(result.target.id);
+    if (targetOnline) {
+      send(targetOnline.ws, {
+        type: 'friend_request_received',
+        fromPlayer: {
+          id: playerId,
+          name: client.playerName,
+          avatarIndex: client.avatarIndex || 0,
+          customAvatar: client.customAvatar || null,
+          vipLevel: Math.min(10, Math.max(1, Math.floor((client.level || 1) / 5) + 1)),
+          level: client.level || 1,
+          coins: client.coins || 0,
+        }
+      });
+    }
+
+    return send(ws, {
+      type: 'send_friend_request_result',
+      ok: true,
+      targetId: result.target.id,
+      message: `Friend request sent to ${result.target.username} (${result.target.id})! Waiting for confirmation... ✉️`
+    });
+  }
+
+  if (type === 'accept_friend_request') {
+    const fromId = msg.fromId || msg.friendId || msg.targetId;
+    const result = AuthService.acceptFriendRequest(playerId, fromId);
+    if (!result.ok) {
+      return send(ws, { type: 'accept_friend_request_result', ok: false, reason: result.reason });
     }
 
     const frClient = getClientByPlayerId(result.friend.id);
-    let frStatus = 'offline';
-    let roomCode = null;
-    let gType = null;
-    if (frClient) {
-      frStatus = frClient.client.status || 'online_lobby';
-      roomCode = frClient.client.currentRoomCode || null;
-      gType = frClient.client.gameType || null;
-    }
+    let frStatus = frClient ? (frClient.client.status || 'online_lobby') : 'offline';
+    let rCode = frClient ? frClient.client.currentRoomCode : null;
+    let gType = frClient ? frClient.client.gameType : null;
 
     const friendPayload = {
       id: result.friend.id,
@@ -347,14 +421,13 @@ function handleMessage(ws, msg) {
       avatarIndex: result.friend.avatarIndex || 0,
       customAvatar: result.friend.customAvatar || null,
       status: frStatus,
-      currentRoomCode: roomCode,
+      currentRoomCode: rCode,
       gameType: gType,
     };
 
-    // If target friend is currently online, notify them with real-time update
     if (frClient) {
       send(frClient.ws, {
-        type: 'friend_added_by_player',
+        type: 'friend_request_accepted',
         friend: {
           id: playerId,
           name: client.playerName,
@@ -366,15 +439,36 @@ function handleMessage(ws, msg) {
           status: client.status || 'online_lobby',
           currentRoomCode: client.currentRoomCode || null,
           gameType: client.gameType || null,
-        },
+        }
       });
     }
 
     return send(ws, {
-      type: 'add_friend_result',
-      ok: true,
+      type: 'friend_request_accepted',
       friend: friendPayload,
-      message: `Added ${result.friend.username} (${result.friend.id}) to friends!`,
+      message: `Accepted friend request from ${result.friend.username}!`
+    });
+  }
+
+  if (type === 'decline_friend_request') {
+    const fromId = msg.fromId || msg.friendId || msg.targetId;
+    const result = AuthService.declineFriendRequest(playerId, fromId);
+    return send(ws, { type: 'decline_friend_request_result', ok: result.ok, declinedId: result.declinedId });
+  }
+
+  if (type === 'get_friend_requests') {
+    const pendingRequests = AuthService.getFriendRequests(playerId);
+    return send(ws, {
+      type: 'friend_requests_list',
+      requests: pendingRequests.map(r => ({
+        id: r.id,
+        name: r.username,
+        avatarIndex: r.avatarIndex || 0,
+        customAvatar: r.customAvatar || null,
+        coins: r.coins || 0,
+        level: r.level || 1,
+        vipLevel: Math.min(10, Math.max(1, Math.floor((r.level || 1) / 5) + 1)),
+      }))
     });
   }
 

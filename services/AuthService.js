@@ -78,6 +78,7 @@ class AuthService {
       avatarIndex: 0,
       customAvatar: null,
       friends: [],
+      friendRequests: [],
       elo: 1200,
       wins: 0,
       losses: 0,
@@ -112,6 +113,7 @@ class AuthService {
       avatarIndex: typeof guestData.avatarIndex === 'number' ? guestData.avatarIndex : 0,
       customAvatar: guestData.customAvatar || null,
       friends: Array.isArray(guestData.friends) ? guestData.friends : [],
+      friendRequests: Array.isArray(guestData.friendRequests) ? guestData.friendRequests : [],
       elo: 1200,
       wins: 0,
       losses: 0,
@@ -274,6 +276,66 @@ class AuthService {
       target.friends = target.friends.filter(id => id !== p.id);
     }
     return { ok: true, removedId: targetRealId };
+  }
+
+  sendFriendRequest(playerId, targetId) {
+    if (!playerId || !targetId) return { ok: false, reason: 'Invalid player IDs' };
+    const p = this.getPlayerById(playerId);
+    const target = this.getPlayerById(targetId);
+    if (!p) return { ok: false, reason: 'Sender player not found' };
+    if (!target) return { ok: false, reason: 'Player with ID ' + targetId + ' not found' };
+    if (p.id.toLowerCase() === target.id.toLowerCase()) return { ok: false, reason: 'Cannot add yourself as a friend' };
+
+    p.friends = p.friends || [];
+    target.friends = target.friends || [];
+    target.friendRequests = target.friendRequests || [];
+
+    if (p.friends.includes(target.id)) return { ok: false, reason: 'Already in your friends list' };
+    if (target.friendRequests.includes(p.id)) return { ok: false, reason: 'Friend request already sent' };
+
+    // If target already sent a request to this player, auto-accept!
+    p.friendRequests = p.friendRequests || [];
+    if (p.friendRequests.includes(target.id)) {
+      return this.acceptFriendRequest(p.id, target.id);
+    }
+
+    target.friendRequests.push(p.id);
+    return { ok: true, sender: this._public(p), target: this._public(target) };
+  }
+
+  acceptFriendRequest(playerId, fromId) {
+    const p = this.getPlayerById(playerId);
+    const from = this.getPlayerById(fromId);
+    if (!p || !from) return { ok: false, reason: 'Player not found' };
+
+    p.friendRequests = (p.friendRequests || []).filter(id => id !== from.id);
+    from.friendRequests = (from.friendRequests || []).filter(id => id !== p.id);
+
+    p.friends = p.friends || [];
+    from.friends = from.friends || [];
+
+    if (!p.friends.includes(from.id)) p.friends.push(from.id);
+    if (!from.friends.includes(p.id)) from.friends.push(p.id);
+
+    return { ok: true, friend: this._public(from), player: this._public(p) };
+  }
+
+  declineFriendRequest(playerId, fromId) {
+    const p = this.getPlayerById(playerId);
+    if (!p) return { ok: false, reason: 'Player not found' };
+    const from = this.getPlayerById(fromId);
+    const fid = from ? from.id : fromId;
+    p.friendRequests = (p.friendRequests || []).filter(id => id !== fid);
+    return { ok: true, declinedId: fid };
+  }
+
+  getFriendRequests(playerId) {
+    const p = this.getPlayerById(playerId);
+    if (!p || !p.friendRequests) return [];
+    return p.friendRequests
+      .map(id => this.getPlayerById(id))
+      .filter(Boolean)
+      .map(req => this._public(req));
   }
 
   _public(player) {
