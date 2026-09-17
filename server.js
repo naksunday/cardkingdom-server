@@ -59,6 +59,41 @@ httpServer.listen(PORT, () => {
   console.log(`   Share via ngrok: npx ngrok http ${PORT}\n`);
 });
 
+function getClientByPlayerId(playerId) {
+  if (!playerId) return null;
+  const targetId = playerId.toString().toLowerCase().trim();
+  for (const [ws, c] of clients.entries()) {
+    if (c.playerId && c.playerId.toString().toLowerCase().trim() === targetId && ws.readyState === WebSocket.OPEN) {
+      return { ws, client: c };
+    }
+  }
+  return null;
+}
+
+function broadcastPresenceToFriends(playerId, status, currentRoomCode = null, gameType = null) {
+  const player = AuthService.getPlayerById(playerId);
+  if (!player || !player.friends || player.friends.length === 0) return;
+  const presenceMsg = {
+    type: 'friend_presence_updated',
+    friendId: player.id,
+    name: player.username,
+    status: status, // 'online_lobby' | 'playing' | 'offline'
+    currentRoomCode: currentRoomCode || null,
+    gameType: gameType || null,
+    avatarIndex: player.avatarIndex || 0,
+    customAvatar: player.customAvatar || null,
+    coins: player.coins || 0,
+    level: player.level || 1,
+    vipLevel: Math.min(10, Math.max(1, Math.floor((player.level || 1) / 5) + 1))
+  };
+  player.friends.forEach(frId => {
+    const onlineFr = getClientByPlayerId(frId);
+    if (onlineFr) {
+      send(onlineFr.ws, presenceMsg);
+    }
+  });
+}
+
 // ── WebSocket connections ─────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
@@ -80,8 +115,12 @@ wss.on('connection', (ws) => {
       roomManager.leaveRoom(client.playerId);
       broadcastRoomList();
     }
+
+    // Broadcast offline presence to friends
+    broadcastPresenceToFriends(client.playerId, 'offline');
+
     clients.delete(ws);
-    console.log(`[WS] ${client.playerName} disconnected`);
+    console.log(`[WS] ${client.playerName} (${client.playerId}) disconnected`);
   });
 
   ws.on('error', (err) => console.error('[WS] Error:', err.message));
@@ -172,8 +211,13 @@ function handleMessage(ws, msg) {
       exp: playerRecord.exp ?? 0,
       level: playerRecord.level ?? 1,
       elo: playerRecord.elo ?? 1200,
+      status: 'online_lobby',
+      currentRoomCode: null,
+      gameType: null,
       token: null,
     });
+
+    broadcastPresenceToFriends(playerId, 'online_lobby');
 
     console.log(`[WS] ${playerRecord.username} (ID:${playerId}, av:${playerRecord.avatarIndex}, coins:${playerRecord.coins}) connected & synced`);
     return send(ws, {
@@ -248,7 +292,35 @@ function handleMessage(ws, msg) {
     });
   }
 
-  // ── Add Friend ──────────────────────────────────────────────────────────────
+  // ── Friends API (Real-Time) ──────────────────────────────────────────────────
+  if (type === 'get_friends') {
+    const friendList = AuthService.getFriends(playerId);
+    const enriched = friendList.map(fr => {
+      const frClient = getClientByPlayerId(fr.id);
+      let status = 'offline';
+      let currentRoomCode = null;
+      let gameType = null;
+      if (frClient) {
+        status = frClient.client.status || 'online_lobby';
+        currentRoomCode = frClient.client.currentRoomCode || null;
+        gameType = frClient.client.gameType || null;
+      }
+      return {
+        id: fr.id,
+        name: fr.username,
+        vipLevel: Math.min(10, Math.max(1, Math.floor((fr.level || 1) / 5) + 1)),
+        coins: fr.coins || 0,
+        level: fr.level || 1,
+        avatarIndex: fr.avatarIndex || 0,
+        customAvatar: fr.customAvatar || null,
+        status: status,
+        currentRoomCode: currentRoomCode,
+        gameType: gameType,
+      };
+    });
+    return send(ws, { type: 'friends_list', friends: enriched });
+  }
+
   if (type === 'add_friend') {
     const targetId = msg.targetId || msg.friendId;
     const result = AuthService.addFriend(playerId, targetId);
@@ -256,25 +328,95 @@ function handleMessage(ws, msg) {
       return send(ws, { type: 'add_friend_result', ok: false, reason: result.reason });
     }
 
-    // Check if friend is currently online
-    for (const [otherWs, otherClient] of clients.entries()) {
-      if (otherClient.playerId.toLowerCase() === targetId.toLowerCase()) {
-        send(otherWs, {
-          type: 'friend_request_received',
-          fromPlayerId: playerId,
-          fromPlayerName: playerName,
-          avatarIndex: client.avatarIndex,
-        });
-        break;
-      }
+    const frClient = getClientByPlayerId(result.friend.id);
+    let frStatus = 'offline';
+    let roomCode = null;
+    let gType = null;
+    if (frClient) {
+      frStatus = frClient.client.status || 'online_lobby';
+      roomCode = frClient.client.currentRoomCode || null;
+      gType = frClient.client.gameType || null;
+    }
+
+    const friendPayload = {
+      id: result.friend.id,
+      name: result.friend.username,
+      vipLevel: Math.min(10, Math.max(1, Math.floor((result.friend.level || 1) / 5) + 1)),
+      coins: result.friend.coins || 0,
+      level: result.friend.level || 1,
+      avatarIndex: result.friend.avatarIndex || 0,
+      customAvatar: result.friend.customAvatar || null,
+      status: frStatus,
+      currentRoomCode: roomCode,
+      gameType: gType,
+    };
+
+    // If target friend is currently online, notify them with real-time update
+    if (frClient) {
+      send(frClient.ws, {
+        type: 'friend_added_by_player',
+        friend: {
+          id: playerId,
+          name: client.playerName,
+          vipLevel: Math.min(10, Math.max(1, Math.floor((client.level || 1) / 5) + 1)),
+          coins: client.coins || 0,
+          level: client.level || 1,
+          avatarIndex: client.avatarIndex || 0,
+          customAvatar: client.customAvatar || null,
+          status: client.status || 'online_lobby',
+          currentRoomCode: client.currentRoomCode || null,
+          gameType: client.gameType || null,
+        },
+      });
     }
 
     return send(ws, {
       type: 'add_friend_result',
       ok: true,
-      friend: result.friend,
+      friend: friendPayload,
       message: `Added ${result.friend.username} (${result.friend.id}) to friends!`,
     });
+  }
+
+  if (type === 'invite_friend') {
+    const targetId = msg.friendId || msg.targetId;
+    const target = getClientByPlayerId(targetId);
+    if (!target) {
+      return send(ws, {
+        type: 'invite_friend_result',
+        ok: false,
+        friendId: targetId,
+        reason: 'Friend is currently offline.',
+      });
+    }
+
+    const currentRoom = roomManager.getRoomByPlayer(playerId);
+    const roomCode = msg.roomCode || (currentRoom ? currentRoom.code : '');
+    const gameType = msg.gameType || (currentRoom ? currentRoom.gameType : 'tienlen');
+    const betAmount = typeof msg.betAmount === 'number' ? msg.betAmount : (currentRoom ? currentRoom.betAmount : 0);
+
+    send(target.ws, {
+      type: 'friend_invite_received',
+      fromPlayerId: playerId,
+      fromPlayerName: client.playerName,
+      avatarIndex: client.avatarIndex,
+      roomCode: roomCode,
+      gameType: gameType,
+      betAmount: betAmount,
+    });
+
+    return send(ws, {
+      type: 'invite_friend_result',
+      ok: true,
+      friendId: targetId,
+      message: `Invitation sent to ${target.client.playerName}! ✉️`,
+    });
+  }
+
+  if (type === 'remove_friend') {
+    const targetId = msg.friendId || msg.targetId;
+    const result = AuthService.removeFriend(playerId, targetId);
+    return send(ws, { type: 'remove_friend_result', ok: result.ok, removedId: result.removedId });
   }
 
   // ── Matchmaking ─────────────────────────────────────────────────────────────
@@ -305,6 +447,12 @@ function handleMessage(ws, msg) {
       });
       room.getPlayer(playerId).ws = ws;
       console.log(`[Room] ${playerName} created ${room.code} (${room.gameType}) bet:${room.betAmount || 0} avatar:${avatarIndex}`);
+      
+      client.status = 'playing';
+      client.currentRoomCode = room.code;
+      client.gameType = room.gameType;
+      broadcastPresenceToFriends(playerId, 'playing', room.code, room.gameType);
+
       send(ws, { type: 'room_created', room: room.publicInfo() });
       broadcastRoomList();
       return;
@@ -314,6 +462,12 @@ function handleMessage(ws, msg) {
   if (type === 'join_room') {
     const result = roomManager.joinRoom({ code: msg.code, playerId, playerName, pin: msg.pin || null, ws, avatarIndex });
     if (!result.ok) return send(ws, { type: 'error', reason: result.reason });
+
+    client.status = 'playing';
+    client.currentRoomCode = result.room.code;
+    client.gameType = result.room.gameType;
+    broadcastPresenceToFriends(playerId, 'playing', result.room.code, result.room.gameType);
+
     send(ws, { type: 'room_joined', room: result.room.publicInfo(), reconnected: result.reconnected });
     result.room.broadcast({ type: 'room_updated', room: result.room.publicInfo() }, playerId);
     broadcastRoomList();
@@ -327,6 +481,10 @@ function handleMessage(ws, msg) {
       roomManager.leaveRoom(playerId);
       broadcastRoomList();
     }
+    client.status = 'online_lobby';
+    client.currentRoomCode = null;
+    client.gameType = null;
+    broadcastPresenceToFriends(playerId, 'online_lobby');
     return send(ws, { type: 'room_left' });
   }
 

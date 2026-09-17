@@ -45,19 +45,28 @@ function checkPassword(password, stored) {
   return attempt === hash;
 }
 
-// ── In-memory player store (replace with Supabase queries later) ─────────────
-const players = new Map(); // username -> player object
+// ── In-memory player store ───────────────────────────────────────────────────
+const playersById = new Map();       // id -> player object
+const playersByUsername = new Map(); // username.toLowerCase() -> player object
 
 class AuthService {
+  _savePlayer(player) {
+    if (!player || !player.id) return;
+    playersById.set(player.id, player);
+    if (player.username) {
+      playersByUsername.set(player.username.toLowerCase(), player);
+    }
+  }
+
   register({ username, password, email }) {
     if (!username || username.length < 3)
       return { ok: false, reason: 'Username must be at least 3 characters' };
     if (!password || password.length < 6)
       return { ok: false, reason: 'Password must be at least 6 characters' };
-    if (players.has(username.toLowerCase()))
+    if (playersByUsername.has(username.toLowerCase()))
       return { ok: false, reason: 'Username already taken' };
 
-    const id = crypto.randomUUID().slice(0, 8);
+    const id = 'CK-' + Math.floor(100000 + Math.random() * 900000);
     const player = {
       id,
       username,
@@ -74,13 +83,46 @@ class AuthService {
       losses: 0,
       createdAt: new Date().toISOString(),
     };
-    players.set(username.toLowerCase(), player);
+    this._savePlayer(player);
     const token = signJWT({ id, username });
     return { ok: true, token, player: this._public(player) };
   }
 
+  registerGuest(guestData) {
+    if (!guestData || !guestData.id) return null;
+    let existing = this.getPlayerById(guestData.id);
+    if (existing) {
+      const updates = {};
+      if (typeof guestData.coins === 'number') updates.coins = guestData.coins;
+      if (typeof guestData.exp === 'number') updates.exp = guestData.exp;
+      if (typeof guestData.avatarIndex === 'number') updates.avatarIndex = guestData.avatarIndex;
+      if (guestData.customAvatar !== undefined) updates.customAvatar = guestData.customAvatar;
+      if (guestData.username) updates.username = guestData.username;
+      return this.updateProfile(existing.id, updates);
+    }
+
+    const player = {
+      id: guestData.id,
+      username: guestData.username || `Player_${guestData.id.slice(-4)}`,
+      email: guestData.email || '',
+      passwordHash: '',
+      coins: typeof guestData.coins === 'number' ? guestData.coins : 10000,
+      exp: typeof guestData.exp === 'number' ? guestData.exp : 0,
+      level: typeof guestData.level === 'number' ? guestData.level : 1,
+      avatarIndex: typeof guestData.avatarIndex === 'number' ? guestData.avatarIndex : 0,
+      customAvatar: guestData.customAvatar || null,
+      friends: Array.isArray(guestData.friends) ? guestData.friends : [],
+      elo: 1200,
+      wins: 0,
+      losses: 0,
+      createdAt: new Date().toISOString(),
+    };
+    this._savePlayer(player);
+    return this._public(player);
+  }
+
   login({ username, password }) {
-    const player = players.get(username.toLowerCase());
+    const player = playersByUsername.get(username.toLowerCase());
     if (!player) return { ok: false, reason: 'Username not found' };
     if (!checkPassword(password, player.passwordHash))
       return { ok: false, reason: 'Incorrect password' };
@@ -91,20 +133,32 @@ class AuthService {
   validateToken(token) {
     const payload = verifyJWT(token);
     if (!payload) return null;
-    return players.get(payload.username.toLowerCase()) || null;
+    return playersByUsername.get(payload.username.toLowerCase()) || null;
   }
 
   getPlayer(username) {
-    return players.get(username.toLowerCase()) || null;
+    if (!username) return null;
+    return playersByUsername.get(username.toLowerCase()) || null;
   }
 
   getPlayerById(id) {
     if (!id) return null;
-    return [...players.values()].find(p => p.id === id || p.id.toLowerCase() === id.toLowerCase()) || null;
+    const q = id.toString().trim();
+    const qLower = q.toLowerCase();
+    
+    // Direct ID lookup
+    if (playersById.has(q)) return playersById.get(q);
+    
+    // Search by case-insensitive ID or username
+    for (const p of playersById.values()) {
+      if (p.id && p.id.toLowerCase() === qLower) return p;
+      if (p.username && p.username.toLowerCase() === qLower) return p;
+    }
+    return null;
   }
 
   getLeaderboard(gameType, limit = 20) {
-    return [...players.values()]
+    return [...playersById.values()]
       .sort((a, b) => b.elo - a.elo)
       .slice(0, limit)
       .map((p, i) => ({ rank: i + 1, ...this._public(p) }));
@@ -208,6 +262,18 @@ class AuthService {
       .map(id => this.getPlayerById(id))
       .filter(Boolean)
       .map(f => this._public(f));
+  }
+
+  removeFriend(playerId, targetId) {
+    const p = this.getPlayerById(playerId);
+    if (!p) return { ok: false, reason: 'Player not found' };
+    const target = this.getPlayerById(targetId);
+    const targetRealId = target ? target.id : targetId;
+    p.friends = (p.friends || []).filter(id => id !== targetRealId);
+    if (target && target.friends) {
+      target.friends = target.friends.filter(id => id !== p.id);
+    }
+    return { ok: true, removedId: targetRealId };
   }
 
   _public(player) {
