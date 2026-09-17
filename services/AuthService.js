@@ -63,7 +63,12 @@ class AuthService {
       username,
       email: email || '',
       passwordHash: hashPassword(password),
-      coins: 1000,
+      coins: 10000,
+      exp: 0,
+      level: 1,
+      avatarIndex: 0,
+      customAvatar: null,
+      friends: [],
       elo: 1200,
       wins: 0,
       losses: 0,
@@ -91,6 +96,11 @@ class AuthService {
 
   getPlayer(username) {
     return players.get(username.toLowerCase()) || null;
+  }
+
+  getPlayerById(id) {
+    if (!id) return null;
+    return [...players.values()].find(p => p.id === id || p.id.toLowerCase() === id.toLowerCase()) || null;
   }
 
   getLeaderboard(gameType, limit = 20) {
@@ -123,28 +133,97 @@ class AuthService {
       });
     });
 
-    // Apply ELO changes + update win/loss
+    // Apply ELO changes + update win/loss + grant EXP
     Object.values(eloMap).forEach(({ player, elo }, idx) => {
       player.elo = Math.max(100, Math.round(elo));
-      if (rankings[0] === player.id) player.wins++;
-      else player.losses++;
+      if (rankings[0] === player.id) {
+        player.wins++;
+        this.addExp(player.id, 150);
+      } else {
+        player.losses++;
+        this.addExp(player.id, 50);
+      }
     });
   }
 
   addCoins(playerId, amount) {
-    const p = [...players.values()].find(pl => pl.id === playerId);
-    if (p) { p.coins = Math.max(0, p.coins + amount); return p.coins; }
+    const p = this.getPlayerById(playerId);
+    if (p) {
+      p.coins = Math.max(0, (p.coins || 0) + amount);
+      return p.coins;
+    }
     return 0;
   }
 
+  addExp(playerId, amount) {
+    const p = this.getPlayerById(playerId);
+    if (p) {
+      p.exp = Math.max(0, (p.exp || 0) + amount);
+      p.level = 1 + Math.floor(p.exp / 300);
+      return { exp: p.exp, level: p.level };
+    }
+    return { exp: 0, level: 1 };
+  }
+
+  updateProfile(playerId, updates = {}) {
+    const p = this.getPlayerById(playerId);
+    if (!p) return null;
+
+    if (typeof updates.coins === 'number') p.coins = Math.max(0, updates.coins);
+    if (typeof updates.exp === 'number') {
+      p.exp = Math.max(0, updates.exp);
+      p.level = 1 + Math.floor(p.exp / 300);
+    }
+    if (typeof updates.avatarIndex === 'number') p.avatarIndex = updates.avatarIndex;
+    if (updates.customAvatar !== undefined) p.customAvatar = updates.customAvatar;
+    if (updates.username && updates.username.length >= 2) p.username = updates.username;
+
+    return this._public(p);
+  }
+
+  addFriend(playerId, targetId) {
+    if (!playerId || !targetId) return { ok: false, reason: 'Invalid player IDs' };
+    if (playerId.toLowerCase() === targetId.toLowerCase()) return { ok: false, reason: 'Cannot add yourself as a friend' };
+
+    const p = this.getPlayerById(playerId);
+    const target = this.getPlayerById(targetId);
+
+    if (!target) return { ok: false, reason: 'Player with ID ' + targetId + ' not found' };
+
+    p.friends = p.friends || [];
+    target.friends = target.friends || [];
+
+    if (p.friends.includes(target.id)) return { ok: false, reason: 'Already in your friends list' };
+
+    p.friends.push(target.id);
+    if (!target.friends.includes(p.id)) target.friends.push(p.id);
+
+    return { ok: true, friend: this._public(target) };
+  }
+
+  getFriends(playerId) {
+    const p = this.getPlayerById(playerId);
+    if (!p || !p.friends) return [];
+    return p.friends
+      .map(id => this.getPlayerById(id))
+      .filter(Boolean)
+      .map(f => this._public(f));
+  }
+
   _public(player) {
+    const exp = player.exp || 0;
     return {
       id: player.id,
       username: player.username,
-      coins: player.coins,
-      elo: player.elo,
-      wins: player.wins,
-      losses: player.losses,
+      coins: player.coins ?? 10000,
+      exp: exp,
+      level: player.level || (1 + Math.floor(exp / 300)),
+      avatarIndex: player.avatarIndex || 0,
+      customAvatar: player.customAvatar || null,
+      friendsCount: (player.friends || []).length,
+      elo: player.elo || 1200,
+      wins: player.wins || 0,
+      losses: player.losses || 0,
     };
   }
 }

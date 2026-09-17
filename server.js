@@ -128,14 +128,65 @@ function handleMessage(ws, msg) {
     return send(ws, { type: 'login_result', ...result });
   }
 
-  // Legacy guest connect (no account)
-  if (type === 'connect_player') {
-    const { playerId, playerName, avatarIndex } = msg;
-    if (!playerId || !playerName) return send(ws, { type: 'error', reason: 'connect_player requires playerId and playerName' });
+  // Legacy guest connect or sync profile
+  if (type === 'connect_player' || type === 'sync_profile') {
+    const { playerId, playerName, avatarIndex, customAvatar, coins, exp } = msg;
+    if (!playerId) return send(ws, { type: 'error', reason: 'connect_player requires playerId' });
+    const name = playerName || 'Player';
     const av = typeof avatarIndex === 'number' ? avatarIndex : 0;
-    clients.set(ws, { playerId, playerName, avatarIndex: av, elo: 1200, token: null });
-    console.log(`[WS] ${playerName} (avatar:${av}) connected`);
-    return send(ws, { type: 'connected', playerId, serverVersion: '2.0.0' });
+
+    let playerRecord = AuthService.getPlayerById(playerId);
+    if (!playerRecord) {
+      playerRecord = {
+        id: playerId,
+        username: name,
+        coins: typeof coins === 'number' ? coins : 10000,
+        exp: typeof exp === 'number' ? exp : 0,
+        level: 1 + Math.floor((exp || 0) / 300),
+        avatarIndex: av,
+        customAvatar: customAvatar || null,
+        friends: [],
+        elo: 1200,
+        wins: 0,
+        losses: 0,
+        createdAt: new Date().toISOString(),
+      };
+      // Register in AuthService
+      AuthService.updateProfile(playerId, playerRecord) || (playerRecord = AuthService._public(playerRecord));
+    } else {
+      const updates = {};
+      if (typeof coins === 'number') updates.coins = coins;
+      if (typeof exp === 'number') updates.exp = exp;
+      if (typeof avatarIndex === 'number') updates.avatarIndex = avatarIndex;
+      if (customAvatar !== undefined) updates.customAvatar = customAvatar;
+      if (name) updates.username = name;
+      playerRecord = AuthService.updateProfile(playerId, updates) || playerRecord;
+    }
+
+    clients.set(ws, {
+      playerId,
+      playerName: playerRecord.username || name,
+      avatarIndex: playerRecord.avatarIndex ?? av,
+      customAvatar: playerRecord.customAvatar || null,
+      coins: playerRecord.coins ?? 10000,
+      exp: playerRecord.exp ?? 0,
+      level: playerRecord.level ?? 1,
+      elo: playerRecord.elo ?? 1200,
+      token: null,
+    });
+
+    console.log(`[WS] ${playerRecord.username} (ID:${playerId}, av:${playerRecord.avatarIndex}, coins:${playerRecord.coins}) connected & synced`);
+    return send(ws, {
+      type: 'profile_synced',
+      playerId,
+      playerName: playerRecord.username,
+      coins: playerRecord.coins,
+      exp: playerRecord.exp,
+      level: playerRecord.level,
+      avatarIndex: playerRecord.avatarIndex,
+      customAvatar: playerRecord.customAvatar,
+      serverVersion: '2.0.0',
+    });
   }
 
   // ── All other messages require identification ───────────────────────────────
@@ -145,6 +196,86 @@ function handleMessage(ws, msg) {
   const avatarIndex = typeof msg.avatarIndex === 'number' ? msg.avatarIndex : (client.avatarIndex || 0);
 
   if (type === 'ping') return send(ws, { type: 'pong', timestamp: Date.now() });
+
+  // ── Profile Real-time Update ────────────────────────────────────────────────
+  if (type === 'update_profile') {
+    const updates = {};
+    if (typeof msg.avatarIndex === 'number') {
+      client.avatarIndex = msg.avatarIndex;
+      updates.avatarIndex = msg.avatarIndex;
+    }
+    if (msg.customAvatar !== undefined) {
+      client.customAvatar = msg.customAvatar;
+      updates.customAvatar = msg.customAvatar;
+    }
+    if (msg.playerName) {
+      client.playerName = msg.playerName;
+      updates.username = msg.playerName;
+    }
+    if (typeof msg.coins === 'number') {
+      client.coins = msg.coins;
+      updates.coins = msg.coins;
+    }
+    if (typeof msg.exp === 'number') {
+      client.exp = msg.exp;
+      updates.exp = msg.exp;
+    }
+
+    const updated = AuthService.updateProfile(playerId, updates);
+
+    // If player is in a room, broadcast update to everyone in the room
+    const room = roomManager.getRoomByPlayer(playerId);
+    if (room) {
+      const p = room.getPlayer(playerId);
+      if (p) {
+        p.name = client.playerName;
+        p.avatarIndex = client.avatarIndex;
+        p.customAvatar = client.customAvatar;
+      }
+      room.broadcastAll({
+        type: 'player_profile_changed',
+        playerId,
+        playerName: client.playerName,
+        avatarIndex: client.avatarIndex,
+        customAvatar: client.customAvatar,
+      });
+    }
+
+    return send(ws, {
+      type: 'profile_updated',
+      ok: true,
+      profile: updated || client,
+    });
+  }
+
+  // ── Add Friend ──────────────────────────────────────────────────────────────
+  if (type === 'add_friend') {
+    const targetId = msg.targetId || msg.friendId;
+    const result = AuthService.addFriend(playerId, targetId);
+    if (!result.ok) {
+      return send(ws, { type: 'add_friend_result', ok: false, reason: result.reason });
+    }
+
+    // Check if friend is currently online
+    for (const [otherWs, otherClient] of clients.entries()) {
+      if (otherClient.playerId.toLowerCase() === targetId.toLowerCase()) {
+        send(otherWs, {
+          type: 'friend_request_received',
+          fromPlayerId: playerId,
+          fromPlayerName: playerName,
+          avatarIndex: client.avatarIndex,
+        });
+        break;
+      }
+    }
+
+    return send(ws, {
+      type: 'add_friend_result',
+      ok: true,
+      friend: result.friend,
+      message: `Added ${result.friend.username} (${result.friend.id}) to friends!`,
+    });
+  }
 
   // ── Matchmaking ─────────────────────────────────────────────────────────────
   if (type === 'quick_match') {
@@ -272,6 +403,20 @@ function handleMessage(ws, msg) {
           if (p.id !== rankings[0]) AuthService.addCoins(p.id, -room.betAmount);
         });
       }
+
+      // Broadcast real-time Coins & EXP to all human players in room
+      room.players.forEach(p => {
+        const record = AuthService.getPlayerById(p.id);
+        if (record && p.ws && p.ws.readyState === WebSocket.OPEN) {
+          send(p.ws, {
+            type: 'profile_updated',
+            coins: record.coins,
+            exp: record.exp,
+            level: record.level,
+            reason: p.id === rankings[0] ? 'Victory Pot!' : 'Match Completed',
+          });
+        }
+      });
     } else {
       scheduleBotTurn(room);
     }
