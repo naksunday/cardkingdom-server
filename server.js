@@ -62,8 +62,15 @@ httpServer.listen(PORT, () => {
 function getClientByPlayerId(playerId) {
   if (!playerId) return null;
   const targetId = playerId.toString().toLowerCase().trim();
+  const player = AuthService.getPlayerById(playerId);
+  const realId = player ? (player.id || '').toLowerCase().trim() : targetId;
+  const realName = player ? (player.username || '').toLowerCase().trim() : '';
+
   for (const [ws, c] of clients.entries()) {
-    if (c.playerId && c.playerId.toString().toLowerCase().trim() === targetId && ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    const cId = (c.playerId || '').toString().toLowerCase().trim();
+    const cName = (c.playerName || '').toString().toLowerCase().trim();
+    if (cId === targetId || cId === realId || (realName && cName === realName) || cName === targetId) {
       return { ws, client: c };
     }
   }
@@ -371,11 +378,17 @@ function handleMessage(ws, msg) {
         });
       }
 
-      return send(ws, {
+      send(ws, {
         type: 'friend_request_accepted',
         friend: friendPayload,
         message: `You and ${result.friend.username} are now friends!`
       });
+
+      broadcastPresenceToFriends(playerId, client.status || 'online_lobby', client.currentRoomCode, client.gameType);
+      if (frClient) {
+        broadcastPresenceToFriends(result.friend.id, frStatus, rCode, gType);
+      }
+      return;
     }
 
     // Pending friend request
@@ -446,11 +459,17 @@ function handleMessage(ws, msg) {
       });
     }
 
-    return send(ws, {
+    send(ws, {
       type: 'friend_request_accepted',
       friend: friendPayload,
       message: `Accepted friend request from ${result.friend.username}!`
     });
+
+    broadcastPresenceToFriends(playerId, client.status || 'online_lobby', client.currentRoomCode, client.gameType);
+    if (frClient) {
+      broadcastPresenceToFriends(result.friend.id, frStatus, rCode, gType);
+    }
+    return;
   }
 
   if (type === 'decline_friend_request') {
