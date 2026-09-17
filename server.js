@@ -96,6 +96,9 @@ function broadcastPresenceToFriends(playerId, status, currentRoomCode = null, ga
 
 // ── WebSocket connections ─────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
+  // Send immediate welcome handshake confirmation
+  send(ws, { type: 'connected', serverVersion: '2.0.0' });
+
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); }
